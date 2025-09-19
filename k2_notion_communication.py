@@ -1084,6 +1084,11 @@ class TelegramBot:
     def _send_shoutout_notification(self, state: ConversationState, photo_urls: List[str]):
         """Send shout-out to the designated chat with images"""
         try:
+            # Check if shoutout chat is configured
+            if not self.settings.shoutout_chat_id:
+                self.logger.warning("Shoutout chat ID not configured - skipping notification")
+                return
+            
             # Get person name
             employees = self.notion.get_employees()
             person_name = next((emp.name for emp in employees if emp.id == state.data.get("person_id")), "Unknown")
@@ -1108,6 +1113,8 @@ class TelegramBot:
             
             shoutout_message += f"🎉 Keep up the amazing work!"
             
+            self.logger.info(f"Sending shoutout to chat {self.settings.shoutout_chat_id}")
+            
             if photo_urls:
                 # Send first photo with the caption message using sendPhoto
                 photo_data = {
@@ -1117,16 +1124,24 @@ class TelegramBot:
                     "parse_mode": "HTML"
                 }
                 
+                self.logger.info(f"Attempting to send photo with shoutout message")
+                
                 # Use requests directly to send photo
                 response = requests.post(
                     f"{self.base_url}/sendPhoto",
                     json=photo_data,
                     timeout=30
                 )
-                success = response.ok
+                
+                if response.ok:
+                    self.logger.info("Photo with shoutout sent successfully")
+                    success = True
+                else:
+                    self.logger.error(f"Failed to send photo: HTTP {response.status_code} - {response.text}")
+                    success = False
                 
                 # Send additional photos if there are more than one
-                if len(photo_urls) > 1:
+                if success and len(photo_urls) > 1:
                     for i, photo_url in enumerate(photo_urls[1:], 2):
                         try:
                             additional_photo_data = {
@@ -1134,24 +1149,29 @@ class TelegramBot:
                                 "photo": photo_url,
                                 "caption": f"📸 Photo {i} from the shout-out"
                             }
-                            requests.post(
+                            additional_response = requests.post(
                                 f"{self.base_url}/sendPhoto",
                                 json=additional_photo_data,
                                 timeout=30
                             )
+                            if not additional_response.ok:
+                                self.logger.error(f"Failed to send additional photo {i}: {additional_response.text}")
                         except Exception as photo_error:
                             self.logger.error(f"Error sending additional shout-out photo: {photo_error}")
             else:
                 # Send text message only if no photos
+                self.logger.info("Sending text-only shoutout message")
                 success = self.send_message(self.settings.shoutout_chat_id, shoutout_message)
+                if not success:
+                    self.logger.error("Failed to send text-only shoutout message")
             
             if success:
-                self.logger.info(f"Shout-out notification sent to chat {self.settings.shoutout_chat_id}")
+                self.logger.info(f"Shout-out notification sent successfully to chat {self.settings.shoutout_chat_id}")
             else:
                 self.logger.error("Failed to send shout-out notification")
                 
         except Exception as e:
-            self.logger.error(f"Error sending shout-out notification: {e}")
+            self.logger.error(f"Error sending shout-out notification: {e}", exc_info=True)
     
     def _cancel_conversation(self, chat_id: int, user_id: int):
         """Cancel active conversation"""
