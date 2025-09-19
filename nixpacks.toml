@@ -1,0 +1,13 @@
+providers = ["python"]
+
+[variables]
+PYTHONUNBUFFERED = "1"
+
+[phases.install]
+cmds = [
+  "pip install --upgrade pip",
+  "pip install -r requirements.txt"
+]
+
+[start]
+cmd = "python -u k2_notion_communication.py"
