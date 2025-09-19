@@ -35,18 +35,24 @@ from enum import Enum
 
 import requests
 
-# Handle Pydantic v1 vs v2 imports
+# Handle Pydantic v1 vs v2 imports (robust)
+from typing import Optional
+
+PYDANTIC_V2 = False
 try:
-    from pydantic import BaseSettings, Field, field_validator
+    # Try v2 first: BaseSettings moved to pydantic-settings
+    from pydantic_settings import BaseSettings, SettingsConfigDict  # type: ignore
+    from pydantic import Field, field_validator  # v2 validators
     PYDANTIC_V2 = True
-except ImportError:
+except (ModuleNotFoundError, ImportError):
+    # Either pydantic-settings not installed or on v1
+    from pydantic import BaseSettings as _BaseSettings, Field
     try:
-        from pydantic_settings import BaseSettings
-        from pydantic import Field, field_validator
-        PYDANTIC_V2 = True
-    except ImportError:
-        from pydantic import BaseSettings, Field, validator
-        PYDANTIC_V2 = False
+        from pydantic import validator  # v1 validator
+    except Exception:
+        validator = None  # Safety: should not happen on v1
+    BaseSettings = _BaseSettings  # type: ignore
+
 
 # System info
 SYSTEM_VERSION = "1.0.0-MVP"
@@ -68,40 +74,51 @@ load_env_file()
 
 class Settings(BaseSettings):
     """Simplified configuration for MVP"""
-    
+
     # Required
-    telegram_bot_token: str = Field(..., env='TELEGRAM_BOT_TOKEN')
-    notion_token: str = Field(..., env='NOTION_TOKEN')
-    employees_db_id: str = Field(..., env='EMPLOYEES_DB_ID')  
-    communication_db_id: str = Field(..., env='COMMUNICATION_DB_ID')  # Renamed from ops_items
-    
+    telegram_bot_token: str = Field(..., alias='TELEGRAM_BOT_TOKEN')
+    notion_token: str = Field(..., alias='NOTION_TOKEN')
+    employees_db_id: str = Field(..., alias='EMPLOYEES_DB_ID')
+    communication_db_id: str = Field(..., alias='COMMUNICATION_DB_ID')
+
     # Optional
-    log_chat_id: Optional[int] = Field(None, env='LOG_CHAT_ID')
-    port: int = Field(8000, env='PORT')  # Railway needs this
-    default_timezone: str = Field('America/Chicago', env='DEFAULT_TIMEZONE')  # Add default timezone
-    
+    log_chat_id: Optional[int] = Field(None, alias='LOG_CHAT_ID')
+    port: int = Field(8000, alias='PORT')  # Railway needs this
+    default_timezone: str = Field('America/Chicago', alias='DEFAULT_TIMEZONE')
+
     if PYDANTIC_V2:
+        # Pydantic v2 config + validators
+        model_config = SettingsConfigDict(
+            env_file=".env",
+            env_file_encoding="utf-8",
+            extra="ignore"
+        )
+
         @field_validator('log_chat_id', mode='before')
         @classmethod
-        def parse_log_chat_id(cls, v):
-            if v == '' or v is None:
+        def _parse_log_chat_id_v2(cls, v):
+            if v in (None, ''):
                 return None
             try:
                 return int(v)
-            except (ValueError, TypeError):
+            except (TypeError, ValueError):
                 return None
     else:
-        @validator('log_chat_id', pre=True)
-        def parse_log_chat_id(cls, v):
-            if v == '' or v is None:
-                return None
-            try:
-                return int(v)
-            except (ValueError, TypeError):
-                return None
-    
-    class Config:
-        env_file = '.env'
+        # Pydantic v1 config + validators
+        class Config:
+            env_file = ".env"
+            env_file_encoding = "utf-8"
+
+        if 'validator' in globals() and validator is not None:
+            @validator('log_chat_id', pre=True)
+            def _parse_log_chat_id_v1(cls, v):
+                if v in (None, ''):
+                    return None
+                try:
+                    return int(v)
+                except (TypeError, ValueError):
+                    return None
+
 
 # ===== LOGGING =====
 
