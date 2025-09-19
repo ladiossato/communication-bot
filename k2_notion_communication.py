@@ -252,23 +252,20 @@ class NotionClient:
             )
             
             if not file_response.ok:
+                self.logger.error(f"Failed to get file info: {file_response.text}")
                 return None
             
             file_info = file_response.json()
             if not file_info.get('ok'):
+                self.logger.error(f"Telegram getFile error: {file_info}")
                 return None
             
             file_path = file_info['result']['file_path']
             
-            # Download the actual image
+            # Return the direct Telegram download URL
             download_url = f"https://api.telegram.org/file/bot{bot_token}/{file_path}"
-            image_response = requests.get(download_url)
             
-            if not image_response.ok:
-                return None
-            
-            # For MVP: We'll return the download URL temporarily
-            # Notion will cache it when we create the page
+            self.logger.info(f"Generated photo URL: {download_url}")
             return download_url
             
         except Exception as e:
@@ -1115,16 +1112,17 @@ class TelegramBot:
             
             self.logger.info(f"Sending shoutout to chat {self.settings.shoutout_chat_id}")
             
-            if photo_urls:
-                # Send first photo with the caption message using sendPhoto
+            # Check if we have photos (use original file_ids instead of URLs)
+            if state.photos:
+                # Send first photo with the caption message using original file_id
                 photo_data = {
                     "chat_id": self.settings.shoutout_chat_id,
-                    "photo": photo_urls[0],
+                    "photo": state.photos[0],  # Use original file_id
                     "caption": shoutout_message,
                     "parse_mode": "HTML"
                 }
                 
-                self.logger.info(f"Attempting to send photo with shoutout message")
+                self.logger.info(f"Attempting to send photo with shoutout message using file_id: {state.photos[0]}")
                 
                 # Use requests directly to send photo
                 response = requests.post(
@@ -1138,15 +1136,17 @@ class TelegramBot:
                     success = True
                 else:
                     self.logger.error(f"Failed to send photo: HTTP {response.status_code} - {response.text}")
-                    success = False
+                    # Fallback to text-only message if photo fails
+                    self.logger.info("Falling back to text-only shoutout")
+                    success = self.send_message(self.settings.shoutout_chat_id, shoutout_message)
                 
                 # Send additional photos if there are more than one
-                if success and len(photo_urls) > 1:
-                    for i, photo_url in enumerate(photo_urls[1:], 2):
+                if success and len(state.photos) > 1:
+                    for i, photo_file_id in enumerate(state.photos[1:], 2):
                         try:
                             additional_photo_data = {
                                 "chat_id": self.settings.shoutout_chat_id,
-                                "photo": photo_url,
+                                "photo": photo_file_id,  # Use original file_id
                                 "caption": f"📸 Photo {i} from the shout-out"
                             }
                             additional_response = requests.post(
