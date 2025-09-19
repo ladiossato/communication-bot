@@ -1,0 +1,7 @@
+# Communication Manager Bot - MVP Dependencies
+
+# Core requirements
+requests>=2.31.0
+pydantic>=2.0.0
+
+# That's it! No external storage, no complex dependencies.
