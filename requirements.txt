@@ -1,7 +1,9 @@
-# Communication Manager Bot - MVP Dependencies
+python-dotenv==1.0.0
+plotly==5.17.0
+pandas==2.1.3
 
-# Core requirements
 requests>=2.31.0
-pydantic>=2.0.0
+python-dateutil>=2.9.0
+pytz>=2024.1
 
-# That's it! No external storage, no complex dependencies.
+pydantic=2.0.0
