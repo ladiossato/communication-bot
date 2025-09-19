@@ -127,7 +127,9 @@ def get_local_time(timezone_name: str = None) -> datetime:
     try:
         import pytz
         tz = pytz.timezone(timezone_name)
-        utc_now = datetime.utcnow().replace(tzinfo=pytz.UTC)
+        utc_now = datetime.now(datetime.UTC if hasattr(datetime, 'UTC') else pytz.UTC)
+        if not hasattr(datetime, 'UTC'):
+            utc_now = utc_now.replace(tzinfo=pytz.UTC)
         local_time = utc_now.astimezone(tz)
         return local_time.replace(tzinfo=None)  # Remove timezone info for consistency
     except (ImportError, Exception):
@@ -276,13 +278,13 @@ class NotionClient:
     def create_communication_item(self, item_type: ItemType, narrative: str, 
                                 person_id: str = None, area: str = None,
                                 occurred_at: datetime = None, photo_urls: List[str] = None,
-                                anonymous: bool = False) -> Optional[str]:
+                                anonymous: bool = False, reporter_name: str = None) -> Optional[str]:
         """Create communication item in Notion"""
         try:
             # Build title
             title = f"{item_type.value} - {(occurred_at or datetime.now()).strftime('%Y-%m-%d')}"
             
-            # Build properties - using rich_text instead of select based on error
+            # Build properties - using rich_text based on earlier error fix
             properties = {
                 'item_title': {
                     'title': [{'text': {'content': title}}]
@@ -304,8 +306,14 @@ class NotionClient:
                 }
             }
             
-            # Add person as rich_text instead of relation (based on error)
-            if person_id and item_type == ItemType.FOLLOWUP:
+            # Add reporter name if not anonymous and provided
+            if not anonymous and reporter_name:
+                properties['reporter'] = {
+                    'rich_text': [{'text': {'content': reporter_name}}]
+                }
+            
+            # Add person as rich_text for follow-ups and shout-outs
+            if person_id and item_type in [ItemType.FOLLOWUP, ItemType.SHOUTOUT]:
                 # Get person name for rich_text field
                 employees = self.get_employees()
                 person_name = next((emp.name for emp in employees if emp.id == person_id), 'Unknown')
@@ -814,6 +822,16 @@ class TelegramBot:
         
         elif state.step == "enter_custom_date":
             self._parse_custom_date(chat_id, user_id, text)
+        
+        elif state.step == "enter_name":
+            # Handle name entry for non-anonymous reports
+            if len(text.strip()) == 0:
+                self.send_message(chat_id, "Please enter a valid name:")
+                return
+            
+            # Store the reporter's name
+            state.data["reporter_name"] = text.strip()
+            self._show_review(chat_id, user_id)
     
     def _parse_custom_date(self, chat_id: int, user_id: int, text: str):
         """Parse custom date input"""
@@ -949,24 +967,41 @@ class TelegramBot:
         self.send_message(chat_id, "Submit this report anonymously?", keyboard)
     
     def _set_anonymous(self, chat_id: int, user_id: int, anonymous: bool):
-        """Set anonymous flag and show review"""
+        """Set anonymous flag and proceed accordingly"""
         if user_id not in self.conversations:
             return
             
         state = self.conversations[user_id]
         state.data["anonymous"] = anonymous
+        
+        if anonymous:
+            # Skip name collection, go straight to review
+            self._show_review(chat_id, user_id)
+        else:
+            # Collect user's name first
+            state.step = "enter_name"
+            self.send_message(chat_id, "Please enter your name:")
+    
+    def _show_review(self, chat_id: int, user_id: int):
+        """Show review screen"""
+        if user_id not in self.conversations:
+            return
+            
+        state = self.conversations[user_id]
         state.step = "review"
         
         # Build review text
         item_type = {
             "followup": "Follow-up",
             "kitchen_issue": "Kitchen Issue", 
-            "facility_issue": "Facility Issue"
+            "facility_issue": "Facility Issue",
+            "shoutout": "Shout-out"
         }.get(state.command, "Report")
         
         narrative = state.data.get("narrative", "")
         photo_count = len(state.photos)
-        anon_text = "Yes" if anonymous else "No"
+        anonymous = state.data.get("anonymous", False)
+        anon_text = "Yes" if anonymous else f"No - {state.data.get('reporter_name', 'Unknown')}"
         
         review = (
             f"<b>📋 Review {item_type}</b>\n\n"
@@ -1019,7 +1054,8 @@ class TelegramBot:
                 area=state.data.get("area"),
                 occurred_at=state.data.get("occurred_at"),
                 photo_urls=photo_urls,
-                anonymous=state.data.get("anonymous", False)
+                anonymous=state.data.get("anonymous", False),
+                reporter_name=state.data.get("reporter_name")  # Pass reporter name
             )
             
             if page_id:
@@ -1055,24 +1091,39 @@ class TelegramBot:
             # Build shout-out message
             occurred_date = state.data.get("occurred_at", datetime.now()).strftime('%B %d, %Y')
             narrative = state.data["narrative"]
+            reporter_name = state.data.get("reporter_name", "")
+            is_anonymous = state.data.get("anonymous", False)
             
+            # Build the shout-out message with optional reporter attribution
             shoutout_message = (
                 f"⭐ <b>SHOUT-OUT!</b> ⭐\n\n"
                 f"👏 <b>{person_name}</b> deserves recognition!\n\n"
                 f"📅 Date: {occurred_date}\n\n"
                 f"💬 <b>What they did:</b>\n{narrative}\n\n"
-                f"🎉 Keep up the amazing work!"
             )
             
+            # Add reporter attribution if not anonymous
+            if not is_anonymous and reporter_name:
+                shoutout_message += f"📝 <b>Recognized by:</b> {reporter_name}\n\n"
+            
+            shoutout_message += f"🎉 Keep up the amazing work!"
+            
             if photo_urls:
-                # Send first photo with the caption message
+                # Send first photo with the caption message using sendPhoto
                 photo_data = {
                     "chat_id": self.settings.shoutout_chat_id,
                     "photo": photo_urls[0],
                     "caption": shoutout_message,
                     "parse_mode": "HTML"
                 }
-                success = self._make_request("sendPhoto", photo_data)
+                
+                # Use requests directly to send photo
+                response = requests.post(
+                    f"{self.base_url}/sendPhoto",
+                    json=photo_data,
+                    timeout=30
+                )
+                success = response.ok
                 
                 # Send additional photos if there are more than one
                 if len(photo_urls) > 1:
@@ -1083,7 +1134,11 @@ class TelegramBot:
                                 "photo": photo_url,
                                 "caption": f"📸 Photo {i} from the shout-out"
                             }
-                            self._make_request("sendPhoto", additional_photo_data)
+                            requests.post(
+                                f"{self.base_url}/sendPhoto",
+                                json=additional_photo_data,
+                                timeout=30
+                            )
                         except Exception as photo_error:
                             self.logger.error(f"Error sending additional shout-out photo: {photo_error}")
             else:
