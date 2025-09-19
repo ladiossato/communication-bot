@@ -1046,7 +1046,7 @@ class TelegramBot:
             del self.conversations[user_id]
     
     def _send_shoutout_notification(self, state: ConversationState, photo_urls: List[str]):
-        """Send shout-out to the designated chat"""
+        """Send shout-out to the designated chat with images"""
         try:
             # Get person name
             employees = self.notion.get_employees()
@@ -1064,22 +1064,31 @@ class TelegramBot:
                 f"🎉 Keep up the amazing work!"
             )
             
-            # Send the message
-            success = self.send_message(self.settings.shoutout_chat_id, shoutout_message)
-            
-            # Send photos separately if they exist
-            if photo_urls and success:
-                for i, photo_url in enumerate(photo_urls):
-                    try:
-                        # Send photo with caption
-                        photo_data = {
-                            "chat_id": self.settings.shoutout_chat_id,
-                            "photo": photo_url,
-                            "caption": f"📸 Photo {i+1} from the shout-out" if len(photo_urls) > 1 else "📸 Shout-out photo"
-                        }
-                        self._make_request("sendPhoto", photo_data)
-                    except Exception as photo_error:
-                        self.logger.error(f"Error sending shout-out photo: {photo_error}")
+            if photo_urls:
+                # Send first photo with the caption message
+                photo_data = {
+                    "chat_id": self.settings.shoutout_chat_id,
+                    "photo": photo_urls[0],
+                    "caption": shoutout_message,
+                    "parse_mode": "HTML"
+                }
+                success = self._make_request("sendPhoto", photo_data)
+                
+                # Send additional photos if there are more than one
+                if len(photo_urls) > 1:
+                    for i, photo_url in enumerate(photo_urls[1:], 2):
+                        try:
+                            additional_photo_data = {
+                                "chat_id": self.settings.shoutout_chat_id,
+                                "photo": photo_url,
+                                "caption": f"📸 Photo {i} from the shout-out"
+                            }
+                            self._make_request("sendPhoto", additional_photo_data)
+                        except Exception as photo_error:
+                            self.logger.error(f"Error sending additional shout-out photo: {photo_error}")
+            else:
+                # Send text message only if no photos
+                success = self.send_message(self.settings.shoutout_chat_id, shoutout_message)
             
             if success:
                 self.logger.info(f"Shout-out notification sent to chat {self.settings.shoutout_chat_id}")
