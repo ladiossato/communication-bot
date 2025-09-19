@@ -35,24 +35,18 @@ from enum import Enum
 
 import requests
 
-# Handle Pydantic v1 vs v2 imports (robust)
-from typing import Optional
-
-PYDANTIC_V2 = False
+# Handle Pydantic v1 vs v2 imports
 try:
-    # Try v2 first: BaseSettings moved to pydantic-settings
-    from pydantic_settings import BaseSettings, SettingsConfigDict  # type: ignore
-    from pydantic import Field, field_validator  # v2 validators
+    from pydantic import BaseSettings, Field, field_validator
     PYDANTIC_V2 = True
-except (ModuleNotFoundError, ImportError):
-    # Either pydantic-settings not installed or on v1
-    from pydantic import BaseSettings as _BaseSettings, Field
+except ImportError:
     try:
-        from pydantic import validator  # v1 validator
-    except Exception:
-        validator = None  # Safety: should not happen on v1
-    BaseSettings = _BaseSettings  # type: ignore
-
+        from pydantic_settings import BaseSettings
+        from pydantic import Field, field_validator
+        PYDANTIC_V2 = True
+    except ImportError:
+        from pydantic import BaseSettings, Field, validator
+        PYDANTIC_V2 = False
 
 # System info
 SYSTEM_VERSION = "1.0.0-MVP"
@@ -74,51 +68,41 @@ load_env_file()
 
 class Settings(BaseSettings):
     """Simplified configuration for MVP"""
-
+    
     # Required
-    telegram_bot_token: str = Field(..., alias='TELEGRAM_BOT_TOKEN')
-    notion_token: str = Field(..., alias='NOTION_TOKEN')
-    employees_db_id: str = Field(..., alias='EMPLOYEES_DB_ID')
-    communication_db_id: str = Field(..., alias='COMMUNICATION_DB_ID')
-
+    telegram_bot_token: str = Field(..., env='TELEGRAM_BOT_TOKEN')
+    notion_token: str = Field(..., env='NOTION_TOKEN')
+    employees_db_id: str = Field(..., env='EMPLOYEES_DB_ID')  
+    communication_db_id: str = Field(..., env='COMMUNICATION_DB_ID')  # Renamed from ops_items
+    
     # Optional
-    log_chat_id: Optional[int] = Field(None, alias='LOG_CHAT_ID')
-    port: int = Field(8000, alias='PORT')  # Railway needs this
-    default_timezone: str = Field('America/Chicago', alias='DEFAULT_TIMEZONE')
-
+    log_chat_id: Optional[int] = Field(None, env='LOG_CHAT_ID')
+    shoutout_chat_id: Optional[int] = Field(None, env='SHOUTOUT_CHAT_ID')  # New chat ID for shoutouts
+    port: int = Field(8000, env='PORT')  # Railway needs this
+    default_timezone: str = Field('America/Chicago', env='DEFAULT_TIMEZONE')  # Add default timezone
+    
     if PYDANTIC_V2:
-        # Pydantic v2 config + validators
-        model_config = SettingsConfigDict(
-            env_file=".env",
-            env_file_encoding="utf-8",
-            extra="ignore"
-        )
-
         @field_validator('log_chat_id', mode='before')
         @classmethod
-        def _parse_log_chat_id_v2(cls, v):
-            if v in (None, ''):
+        def parse_log_chat_id(cls, v):
+            if v == '' or v is None:
                 return None
             try:
                 return int(v)
-            except (TypeError, ValueError):
+            except (ValueError, TypeError):
                 return None
     else:
-        # Pydantic v1 config + validators
-        class Config:
-            env_file = ".env"
-            env_file_encoding = "utf-8"
-
-        if 'validator' in globals() and validator is not None:
-            @validator('log_chat_id', pre=True)
-            def _parse_log_chat_id_v1(cls, v):
-                if v in (None, ''):
-                    return None
-                try:
-                    return int(v)
-                except (TypeError, ValueError):
-                    return None
-
+        @validator('log_chat_id', pre=True)
+        def parse_log_chat_id(cls, v):
+            if v == '' or v is None:
+                return None
+            try:
+                return int(v)
+            except (ValueError, TypeError):
+                return None
+    
+    class Config:
+        env_file = '.env'
 
 # ===== LOGGING =====
 
@@ -156,6 +140,7 @@ class ItemType(Enum):
     FOLLOWUP = "Follow-up"
     KITCHEN_ISSUE = "Kitchen Issue"
     FACILITY_ISSUE = "Facility Issue"
+    SHOUTOUT = "Shout-out"
 
 @dataclass
 class Employee:
@@ -464,6 +449,8 @@ class TelegramBot:
                 self._start_kitchen_issue(chat_id, user_id)
             elif command == "/facility":
                 self._start_facility_issue(chat_id, user_id)
+            elif command == "/shoutout":
+                self._start_shoutout(chat_id, user_id)
             elif command == "/cancel_comm":
                 self._cancel_conversation(chat_id, user_id)
             elif command == "/comm_help":
@@ -505,6 +492,8 @@ class TelegramBot:
             self._start_kitchen_issue(chat_id, user_id)
         elif data == "start_facility":
             self._start_facility_issue(chat_id, user_id)
+        elif data == "start_shoutout":
+            self._start_shoutout(chat_id, user_id)
         elif data.startswith("person_"):
             self._select_person(chat_id, user_id, data.split("_", 1)[1])
         elif data.startswith("area_"):
@@ -548,10 +537,11 @@ class TelegramBot:
         """Send start menu"""
         text = (
             f"<b>Communication Manager Bot v{SYSTEM_VERSION}</b>\n\n"
-            "Report operational issues and follow-ups:\n\n"
+            "Report operational issues and feedback:\n\n"
             "• Follow-ups about team members\n"
             "• Kitchen operational issues\n" 
-            "• Facility infrastructure issues\n\n"
+            "• Facility issues (safety, cleanliness, etc.)\n"
+            "• Shout-outs for great work\n\n"
             "What would you like to report?"
         )
         
@@ -559,7 +549,8 @@ class TelegramBot:
             "inline_keyboard": [
                 [{"text": "👥 Follow-up", "callback_data": "start_followup"}],
                 [{"text": "🍳 Kitchen Issue", "callback_data": "start_kitchen"}],
-                [{"text": "🏢 Facility Issue", "callback_data": "start_facility"}]
+                [{"text": "🏢 Facility Issue", "callback_data": "start_facility"}],
+                [{"text": "⭐ Shout-out", "callback_data": "start_shoutout"}]
             ]
         }
         
@@ -573,6 +564,7 @@ class TelegramBot:
             "/followup - Report about team member\n"
             "/kitchen - Report kitchen issue\n"
             "/facility - Report facility issue\n"
+            "/shoutout - Give someone recognition\n"
             "/cancel_comm - Cancel current report\n"
             "/comm_help - Show this help\n"
             "/comm_status - System diagnostics\n\n"
@@ -679,7 +671,30 @@ class TelegramBot:
         
         keyboard["inline_keyboard"].append([{"text": "❌ Cancel", "callback_data": "cancel"}])
         
-        self.send_message(chat_id, "<b>Facility Issue</b>\n\nWhat area/system?", keyboard)
+    def _start_shoutout(self, chat_id: int, user_id: int):
+        """Start shout-out flow"""
+        self.conversations[user_id] = ConversationState(
+            user_id=user_id,
+            chat_id=chat_id,
+            command="shoutout",
+            step="select_person"
+        )
+        
+        employees = self.notion.get_employees()
+        if not employees:
+            self.send_message(chat_id, "No employees found. Contact support.")
+            return
+        
+        keyboard = {"inline_keyboard": []}
+        for emp in employees[:20]:  # Limit for keyboard
+            keyboard["inline_keyboard"].append([{
+                "text": emp.name,
+                "callback_data": f"person_{emp.id}"
+            }])
+        
+        keyboard["inline_keyboard"].append([{"text": "❌ Cancel", "callback_data": "cancel"}])
+        
+        self.send_message(chat_id, "<b>⭐ Shout-out</b>\n\nWho deserves recognition?", keyboard)
     
     def _select_person(self, chat_id: int, user_id: int, person_id: str):
         """Handle person selection"""
@@ -991,7 +1006,8 @@ class TelegramBot:
             item_type_map = {
                 "followup": ItemType.FOLLOWUP,
                 "kitchen_issue": ItemType.KITCHEN_ISSUE,
-                "facility_issue": ItemType.FACILITY_ISSUE
+                "facility_issue": ItemType.FACILITY_ISSUE,
+                "shoutout": ItemType.SHOUTOUT
             }
             item_type = item_type_map[state.command]
             
@@ -1007,11 +1023,17 @@ class TelegramBot:
             )
             
             if page_id:
+                # Send confirmation to user
                 self.send_message(chat_id, 
                                 f"✅ <b>Report Submitted!</b>\n\n"
                                 f"Your {item_type.value.lower()} has been recorded.\n"
                                 f"Report ID: {page_id[:8]}...\n\n"
                                 f"Thank you for your feedback!")
+                
+                # Special handling for shout-outs - send to shoutout chat
+                if item_type == ItemType.SHOUTOUT and self.settings.shoutout_chat_id:
+                    self._send_shoutout_notification(state, photo_urls)
+                    
             else:
                 self.send_message(chat_id, "❌ Failed to submit. Please try again.")
             
@@ -1022,6 +1044,50 @@ class TelegramBot:
         # Clean up conversation
         if user_id in self.conversations:
             del self.conversations[user_id]
+    
+    def _send_shoutout_notification(self, state: ConversationState, photo_urls: List[str]):
+        """Send shout-out to the designated chat"""
+        try:
+            # Get person name
+            employees = self.notion.get_employees()
+            person_name = next((emp.name for emp in employees if emp.id == state.data.get("person_id")), "Unknown")
+            
+            # Build shout-out message
+            occurred_date = state.data.get("occurred_at", datetime.now()).strftime('%B %d, %Y')
+            narrative = state.data["narrative"]
+            
+            shoutout_message = (
+                f"⭐ <b>SHOUT-OUT!</b> ⭐\n\n"
+                f"👏 <b>{person_name}</b> deserves recognition!\n\n"
+                f"📅 Date: {occurred_date}\n\n"
+                f"💬 <b>What they did:</b>\n{narrative}\n\n"
+                f"🎉 Keep up the amazing work!"
+            )
+            
+            # Send the message
+            success = self.send_message(self.settings.shoutout_chat_id, shoutout_message)
+            
+            # Send photos separately if they exist
+            if photo_urls and success:
+                for i, photo_url in enumerate(photo_urls):
+                    try:
+                        # Send photo with caption
+                        photo_data = {
+                            "chat_id": self.settings.shoutout_chat_id,
+                            "photo": photo_url,
+                            "caption": f"📸 Photo {i+1} from the shout-out" if len(photo_urls) > 1 else "📸 Shout-out photo"
+                        }
+                        self._make_request("sendPhoto", photo_data)
+                    except Exception as photo_error:
+                        self.logger.error(f"Error sending shout-out photo: {photo_error}")
+            
+            if success:
+                self.logger.info(f"Shout-out notification sent to chat {self.settings.shoutout_chat_id}")
+            else:
+                self.logger.error("Failed to send shout-out notification")
+                
+        except Exception as e:
+            self.logger.error(f"Error sending shout-out notification: {e}")
     
     def _cancel_conversation(self, chat_id: int, user_id: int):
         """Cancel active conversation"""
